@@ -1,0 +1,337 @@
+#資策會專題MLB賽事預測分析
+#MLB棒球分析每場賽前分析數據整理
+
+
+#套件載入
+library(dplyr)
+library(caret)
+library(neuralnet)
+#讀入data
+hitting_gamelog_basic = read.csv("E:/project/mlb_data/data/hitting/mlbdata_raw.csv",stringsAsFactors = T, header = T)
+pitching_gamelog_basic = read.csv("E:/project/mlb_data/data/pitching/p_mlb_data0016_v2.csv",stringsAsFactors =T, header = T)
+#排序
+hitting_game_logbasic = hitting_gamelog_basic %>% arrange(year, team_id, game_date) %>% mutate(Home = if_else(hitting_gamelog_basic$home_away == "H",hitting_gamelog_basic$team_id, hitting_gamelog_basic$opponent_id), AWAY = if_else(hitting_gamelog_basic$home_away == "A",hitting_gamelog_basic$team_id, hitting_gamelog_basic$opponent_id))#加上主場球隊及客場球隊的team_id欄位
+pitching_gamelog_basic = pitching_gamelog_basic %>% mutate(year = as.integer(substring(game_date,1,4)))
+pitching_gamelog_basic = pitching_gamelog_basic %>% arrange(year, team_id, game_date)
+eachTeam1To12 = hitting_gamelog_basic %>% distinct(year,team_id, game_date) %>% group_by(year,team_id) %>% slice(1:12)#每年每隊前12場數據
+
+
+##分析變數整理
+
+#打者
+1. year 賽季 ( 2000~2016)
+2. team_id 隊伍ID 
+3. league 聯盟 ( AL or NL)
+4. home_away 主客場 ( H or A)
+5. opponent_id 對手ID
+6. opponent_league 對手聯盟 ( AL or NL)
+7. game_date 比賽日期
+8. game_nbr 是否為雙重賽 ( 1 or 2)
+9. avg 球隊打擊率 ( = h/ab)
+10. slg 球隊長打率  ( = tb / ab)
+11. obp 球隊上壘率  ( = (h + bb) / (ab + bb + sf))
+12. so 球隊被三振率 ( = so / ab)
+13. bb 球隊保送率 ( = bb / (ab + bb + sf))
+14. sb 球隊盜壘成功率 ( = sb / (sb + cs))
+15. go_ao 滾飛比率  ( = go / ao)
+16. lob 每場平均殘壘 ( = lob / g)
+17. team_result 賽事結果 (W or L)
+
+
+hitting_gamelog = hitting_gamelog_basic
+#把前12場的數據去除
+for(i in 1:nrow(eachTeam1To12)){
+    hitting_gamelog = hitting_gamelog %>% filter(team_id != eachTeam1To12[[2]][i] | game_date != eachTeam1To12[[3]][i])
+}
+#寫個function 算出各個數值
+hitterRecord = function(year, team_id, game_date){
+  Year = year
+  teamID = team_id
+  gameDate = game_date
+  historyTable = hitting_gamelog_basic %>% filter(year == Year, team_id == teamID, game_date < gameDate)
+  ab_before= sum(historyTable$ab, na.rm= T)
+  h_before = sum(historyTable$h, na.rm= T)
+  tb_before = sum(historyTable$tb, na.rm= T)
+  bb_before = sum(historyTable$bb, na.rm= T)
+  sf_before = sum(historyTable$sf, na.rm= T)
+  so_before = sum(historyTable$so, na.rm= T)
+  sb_before = sum(historyTable$sb, na.rm= T)
+  cs_before = sum(historyTable$cs, na.rm= T)
+  go_before = sum(historyTable$go, na.rm= T)
+  ao_before = sum(historyTable$ao, na.rm= T)
+  lob_before = sum(historyTable$lob, na.rm= T)
+  g_before = historyTable %>% distinct(game_id) %>% nrow()
+  
+  team_avg_before = h_before/ab_before
+  team_slg_before = tb_before/ ab_before
+  team_obp_before = (h_before + bb_before)/(ab_before + bb_before + sf_before)
+  team_so_before = so_before / ab_before
+  team_bb_before = bb_before / (ab_before + bb_before + sf_before)
+  team_sb_before = sb_before / (sb_before + cs_before)
+  team_go_ao_before = go_before / ao_before
+  team_lob_before = lob_before / g_before
+  
+  result = data.frame(t_avg = team_avg_before, t_slg = team_slg_before, t_obp = team_obp_before, t_so = team_so_before, t_bb = team_bb_before, t_sb = team_sb_before, t_go_ao = team_go_ao_before, t_lob = team_lob_before)
+  
+  return(result)
+}
+team_record= data.frame()
+team_schedule = hitting_gamelog %>% distinct(game_id, team_id, .keep_all = T) %>% select(year, team_id, league, home_away, opponent_id, opponent_league, game_date, game_nbr)
+for(i in 1:nrow(team_schedule)){
+  records = hitterRecord(year = team_schedule[i,"year"], team_id = team_schedule[i,"team_id"], game_date = team_schedule[i,"game_date"])
+  team_record = team_record %>% bind_rows(records)
+}
+#team_result表格
+team_result = hitting_gamelog %>% distinct(game_id, team_id, .keep_all = T) %>% select(team_result)
+#結合表格
+hitting_analyze = team_schedule %>% bind_cols(team_record) %>% bind_cols(team_result)
+
+
+#投手
+1. year 球季
+2. player_id 投手ID ( 只取先發投手 )
+3. team_id 球隊ID 
+4. league 所屬聯盟  ( AL or NL )
+5. opponent_id 對手ID
+6. opponent_league 對手隊伍所屬聯盟 ( AL or NL )
+7. game_date 日期
+8. game_nbr 是否雙重賽 ( 1 or 2)
+9. era 防禦率 ( = er * 9 / ip )
+10. whip 每局被上壘率 ( = ( h + bb ) / ip)
+11. avg 被打擊率  ( = h / ab)
+12. np 平均投球數 ( = np / g )
+13. ip 平均投球局數 ( = ip / g )
+14. tbf 平均面對打席 ( = tbf / g)
+15. so 三振率 ( = so * 9 / ip)
+16. hr 被全壘打率 ( = hr * 9 / ip)
+17. s 好球率 ( = s / np )
+18. go_ao 滾飛比率 ( = go / ao )
+19. wp 平均暴投次數( = wp * 9 / ip )
+20. gidp 雙殺打率 ( gidp * 9 / ip )
+
+
+pitching_gamelog = pitching_gamelog_basic
+#先去掉球隊前12場的數據
+for(i in 1:nrow(eachTeam1To12)){
+    pitching_gamelog = pitching_gamelog %>% filter(team_id != eachTeam1To12[[2]][i] | game_date != eachTeam1To12[[3]][i])
+}
+#投手各項數據
+pitcherRecord = function(year, player_id, game_date){
+  Year = as.integer(year)
+  playerID = as.integer(player_id)
+  gameDate = as.character(game_date)
+  historyTable = pitching_gamelog_basic %>% filter(year == Year, player_id == playerID, game_date < gameDate)
+ 
+  ip_before = sum(as.integer(historyTable$ip), na.rm = T) + sum((historyTable$ip-as.integer(historyTable$ip))/0.3, na.rm = T)
+  er_before = sum(historyTable$er, na.rm = T)
+  h_before = sum(historyTable$h, na.rm = T)
+  bb_before = sum(historyTable$bb, na.rm = T)
+  ab_before = sum(historyTable$ab, na.rm = T)
+  np_before = sum(historyTable$np, na.rm = T)
+  g_before = sum(historyTable$g, na.rm = T)
+  tbf_before = sum(historyTable$tbf, na.rm = T)
+  so_before = sum(historyTable$so, na.rm = T)
+  hr_before = sum(historyTable$hr, na.rm = T)
+  s_before = sum(historyTable$s, na.rm = T)
+  go_before = sum(historyTable$go, na.rm = T)
+  ao_before = sum(historyTable$ao, na.rm = T)
+  wp_before = sum(historyTable$wp, na.rm = T)
+  gidp_before = sum(historyTable$gidp, na.rm = T)
+  
+  team_era_before = er_before * 9 / ip_before 
+  team_whip_before = ( h_before + bb_before ) / ip_before
+  team_avg_before = h_before / ab_before
+  team_np_before = np_before / g_before 
+  team_ip_before = ip_before / g_before
+  team_tbf_before = tbf_before / g_before
+  team_so_before = so_before * 9 / ip_before
+  team_hr_before  = hr_before * 9 / ip_before
+  team_s_before = s_before / np_before 
+  team_go_ao_before = go_before / ao_before 
+  team_wp_before = wp_before * 9 / ip_before
+  team_gidp_before = gidp_before * 9 / ip_before 
+  
+  
+  result = data.frame(t_era = team_era_before, t_whip = team_whip_before, t_avg = team_avg_before, t_np = team_np_before, t_ip = team_ip_before, t_tbf = team_tbf_before, t_so = team_so_before, t_hr = team_hr_before, t_s = team_s_before, t_go_ao = team_go_ao_before, t_wp = team_wp_before, t_gidp = team_gidp_before)
+  
+  return(result)
+}
+#取我們想要的欄位
+team_record= data.frame()
+team_schedule = pitching_gamelog %>% group_by(team_id, game_id) %>% arrange(-gs) %>% slice(1) %>% data.frame() %>% select(year,player_id, team_id, league, opponent_id, opponent_league, game_date, game_nbr)
+#加入投手數據
+for(i in 1:nrow(team_schedule)){
+  records = pitcherRecord(year = team_schedule[i,"year"], player_id = team_schedule[i,"player_id"], game_date = team_schedule[i,"game_date"])
+  team_record = team_record %>% bind_rows(records)
+}
+#結合表格
+pitching_analyze = team_schedule %>% bind_cols(team_record)
+
+
+
+發現有投手之前從未出賽，則用當年球隊數據來估計
+
+
+errorRecords = pitching_analyze %>% filter(is.na(pitching_analyze$t_ip)) %>% select(year,player_id, team_id, league, opponent_id, opponent_league, game_date, game_nbr)
+#function：為球隊成績
+teamPitchRecord = function(year, team_id, game_date){
+  Year = year
+  teamID = team_id
+  gameDate = game_date
+  historyTable = pitching_gamelog_basic %>% filter(year == Year, team_id == teamID, game_date < gameDate) %>% group_by(team_id, game_id) %>% arrange(-gs) %>% slice(1) %>% data.frame()
+ 
+  ip_before = sum(as.integer(historyTable$ip), na.rm = T) + sum((historyTable$ip-as.integer(historyTable$ip))/0.3, na.rm = T)
+  er_before = sum(historyTable$er, na.rm = T)
+  h_before = sum(historyTable$h, na.rm = T)
+  bb_before = sum(historyTable$bb, na.rm = T)
+  ab_before = sum(historyTable$ab, na.rm = T)
+  np_before = sum(historyTable$np, na.rm = T)
+  g_before = sum(historyTable$g, na.rm = T)
+  tbf_before = sum(historyTable$tbf, na.rm = T)
+  so_before = sum(historyTable$so, na.rm = T)
+  hr_before = sum(historyTable$hr, na.rm = T)
+  s_before = sum(historyTable$s, na.rm = T)
+  go_before = sum(historyTable$go, na.rm = T)
+  ao_before = sum(historyTable$ao, na.rm = T)
+  wp_before = sum(historyTable$wp, na.rm = T)
+  gidp_before = sum(historyTable$gidp, na.rm = T)
+  
+  team_era_before = er_before * 9 / ip_before 
+  team_whip_before = ( h_before + bb_before ) / ip_before
+  team_avg_before = h_before / ab_before
+  team_np_before = np_before / g_before 
+  team_ip_before = ip_before / g_before
+  team_tbf_before = tbf_before / g_before
+  team_so_before = so_before * 9 / ip_before
+  team_hr_before  = hr_before * 9 / ip_before
+  team_s_before = s_before / np_before 
+  team_go_ao_before = go_before / ao_before 
+  team_wp_before = wp_before * 9 / ip_before
+  team_gidp_before = gidp_before * 9 / ip_before 
+  
+  
+  result = data.frame(t_era = team_era_before, t_whip = team_whip_before, t_avg = team_avg_before, t_np = team_np_before, t_ip = team_ip_before, t_tbf = team_tbf_before, t_so = team_so_before, t_hr = team_hr_before, t_s = team_s_before, t_go_ao = team_go_ao_before, t_wp = team_wp_before, t_gidp = team_gidp_before)
+  
+  return(result)
+}
+team_record = data.frame()
+for(i in 1:nrow(errorRecords)){
+  records = teamPitchRecord(year = errorRecords[i,"year"], team_id = errorRecords[i,"team_id"], game_date = errorRecords[i,"game_date"])
+  team_record = team_record %>% bind_rows(records)
+}
+errorRecords = errorRecords %>% bind_cols(team_record)
+#覆蓋紀錄
+for(i in 1:nrow(errorRecords)){
+  pitching_analyze[pitching_analyze$year == errorRecords[i,"year"] & pitching_analyze$player_id==errorRecords[i,"player_id"] & pitching_analyze$game_date == errorRecords[i,"game_date"],] = errorRecords[i,]
+}
+#處理2000紀錄沒有np欄位的問題(直接當作NA)
+pitching_analyze[pitching_analyze$year == 2000,"t_np"] = NA
+
+
+合併hitting_analyze和pitching_analyze
+
+
+#資料合併
+analyzeData = hitting_analyze %>% left_join(pitching_analyze, by = c("year","team_id" = "opponent_id", "league" = "opponent_league", "opponent_id" = "team_id", "opponent_league" = "league", "game_date", "game_nbr"))
+#重新命名
+names(analyzeData) = c("year","team_id","league","home_away","opponent_id","opponent_league","game_date","game_nbr","t_avg_bat","t_slg_bat","t_obp_bat","t_so_bat","t_bb_bat","t_sb_bat","t_go_ao_bat","t_lob_bat","team_result","opponent_pitcher_id","t_era_pitch","t_whip_pitch","t_avg_pitch","t_np_pitch","t_ip_pitch","t_tbf_pitch","t_so_pitch","t_hr_pitch","t_s_pitch","t_go_ao_pitch","t_wp_pitch","t_gidp_pitch")
+#欄位排序一下(可省略，為了表格好看而已)
+analyzeData = analyzeData %>% select(1:6,18,7:16,19:30,17)
+#調整結構
+for(i in 1:9){
+  analyzeData[[i]] = as.factor(analyzeData[[i]])
+}
+
+
+
+新加變數：士氣值(moral)
+
+
+#此function用來做士氣值的運算
+morale = function(year, team_id){
+  Year = year
+  teamID = team_id
+  team_result = hitting_gamelog_basic %>% distinct(game_id, team_id, .keep_all = T) %>% filter(year == Year, team_id == teamID)
+  
+  result = as.character(team_result$team_result)
+  for(i in 1:length(result)){
+    result[i] = switch(result[i],W=3,T=1,L=0) #如果result是W的話，重新給值為3、T為1，L為0
+  }
+  result = as.integer(result)
+  result_1 = c(0,result[-length(result)])
+  result_2 = c(0,result_1[-length(result_1)])
+  result_3 = c(0,result_2[-length(result_2)])
+  pre_result = data.frame(result_1,result_2,result_3)
+  
+  moral_result = team_result %>% bind_cols(pre_result) %>% mutate(moral = result_1 * 3 + result_2 * 2 + result_3 * 1) %>% select(year,team_id,game_date,moral)
+  return(moral_result)
+}
+year_teamID = hitting_gamelog_basic %>% distinct(year, team_id)
+morals = data.frame()
+for(i in 1:nrow(year_teamID)){
+  moral_record = morale(year = year_teamID[[1]][i], team_id = year_teamID[[2]][i])
+  morals = morals %>% bind_rows(moral_record)
+}
+#去除前12場
+for(i in 1:nrow(eachTeam1To12)){
+    morals = morals %>% filter(team_id != eachTeam1To12[[2]][i] | game_date != eachTeam1To12[[3]][i])
+}
+morales = morals %>% select(moral)
+analyzeData = analyzeData %>% bind_cols(morales)
+
+準備開始建模：svm
+
+
+analyzeData = analyzeData %>% na.omit()#去除紀錄有NA值的筆數
+is.na(analyzeData) = sapply(analyzeData, is.infinite)
+analyzeData = na.omit(analyzeData)
+set.seed(3)
+#把資料分成training data 和 testing data
+ind<-sample(1:2, size=nrow(analyzeData), replace=T, prob=c(0.7, 0.3))
+traindata=analyzeData[ind==1,]
+testdata=analyzeData[ind==2,]
+svm.model = svm(team_result ~ ., data = traindata)
+#計算準確率
+library(caret)
+svm.pred = predict(svm.model, testdata[,!names(testdata) %in% c("team_result")])
+svm.table = table(svm.pred, testdata$team_result)
+confusionMatrix(svm.table)
+#結果55.78%
+
+#程式碼部分感謝培原協助
+https://rpubs.com/skydome20/R-Note8-ANN
+
+
+#試驗類神經網路，結果53.31%
+bpn.traindata = traindata_scale_2 %>% select(10:29)
+bpn.traindata = bpn.traindata %>% cbind(class.ind(traindata_scale_2$year))
+bpn.traindata = bpn.traindata %>% cbind(class.ind(traindata_scale_2$team_id))
+bpn.traindata = bpn.traindata %>% cbind(class.ind(traindata_scale_2$league))
+bpn.traindata = bpn.traindata %>% cbind(class.ind(traindata_scale_2$home_away))
+bpn.traindata = bpn.traindata %>% cbind(class.ind(traindata_scale_2$opponent_id))
+bpn.traindata = bpn.traindata %>% cbind(class.ind(traindata_scale_2$opponent_league))
+bpn.traindata = bpn.traindata %>% cbind(class.ind(traindata_scale_2$opponent_pitcher_id))
+bpn.traindata = bpn.traindata %>% cbind(class.ind(traindata_scale_2$game_nbr))
+bpn.traindata = bpn.traindata %>% cbind(class.ind(traindata_scale_2$team_result))
+names(bpn.traindata)[38:69] = names(bpn.traindata)[38:69] %>% paste0("_1")
+bpn.formula = as.formula(paste("L+T+W ~ ", paste(names(bpn.traindata)[-1497:-1499], collapse = "+")))
+#貝氏分類
+library(e1071) 
+classifier=naiveBayes(traindata[, !names(traindata) %in% c("team_result")], traindata$team_result)
+bayes.table = table(predict(classifier, testdata[,!names(testdata) %in% c("team_result")]), testdata$team_result)
+confusionMatrix(bayes.table)
+#結果51.78%
+
+
+
+team_record= data.frame()
+for(i in 1:nrow(analyzeData)){
+  records = analyzeData %>% filter(game_date == .[i,"game_date"], team_id == .[i,"opponent_id"], opponent_id == analyzeData[i,"team_id"], game_nbr == .[i,"game_nbr"])
+  
+  rows = records %>% nrow()
+  if(rows == 0){
+    records = rep(NULL,31)
+  }
+  
+  team_record = team_record %>% bind_rows(records)
+}
